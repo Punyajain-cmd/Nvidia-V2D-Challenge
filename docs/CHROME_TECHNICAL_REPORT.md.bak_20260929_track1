@@ -1,0 +1,304 @@
+﻿# CHROME: Contact-conditioned Human-Ruled Object Metric Estimation
+
+**Track:** NVIDIA Video to Data (V2D) Challenge — Track 1 (Monocular 4D HOI Reconstruction)  
+**Working title:** CHROME  
+**Status:** Implementation draft (code under `D:\V2D_Challenge\chrome`)  
+**Date:** 2026-09-26 (v2: evaluation section, benchmark, optimizer rewrite)
+
+## Abstract
+
+Monocular 4D human–object interaction (HOI) reconstruction is usually solved by cascading appearance-based foundation models. Track 1 of the V2D Challenge, however, scores submissions on mesh Chamfer distance *and* on physical plausibility (joint/object acceleration error and contact penetration). CHROME treats feed-forward vision only as initialization. It (1) locks metric scale using the human body as a ruler (foot–ground contact and anthropometric bone lengths), (2) builds a language-conditioned contact-phase schedule from the episode action text and aligns it to video with hand–object contact proxies, and (3) runs a test-time 4D optimizer whose losses mirror the official scoring axes. Because the Track-1 release has no ground truth and the official scorer is not public, we validate the optimizer on a 40-sequence synthetic benchmark with known metric GT: on 16 held-out sequences CHROME v2 lowers root-relative MPJPE from 51.0 to 37.7 mm, object-to-body error from 70.9 to 50.8 mm, and joint/object acceleration error from 2.62/1.50 to 1.72/0.72 m/s² compared with the best tuned temporal-smoothing baseline. It does not improve penetration measured against the true floor. These are synthetic numbers, not leaderboard scores (§6).
+
+## 1. Introduction
+
+Human video is the scalable substrate for robot learning, but the pipeline from RGB to metric 4D HOI still breaks in ways that isolated benchmarks hide. V2D Track 1 asks for human body and hands, object geometry, object pose, and metric scale from a single third-person RGB stream, evaluated against multi-view references on accuracy and physical plausibility.
+
+Cascaded systems (depth → segmentation → 6D pose → body mesh) optimize local appearance cues. They do not directly minimize acceleration error or penetration, and monocular scale remains fragile. CHROME’s claim is that **scoring-aligned test-time physics**, conditioned on **language-derived contact phases** and **human metric scale**, is a better inductive bias for this track than swapping one foundation model for another.
+
+## 2. Related framing (short)
+
+- Feed-forward 4D HOI / human mesh recovery / FoundationPose-style object tracking provide strong inits.
+- Contact and physics-aware refinement appear in grasp and HOI optimization literature; we specialize them to V2D’s metrics and language metadata.
+- Test-time training / episode-wise adaptation is attractive here because the public split has only 30 episodes.
+
+## 3. Method
+
+### 3.1 Problem
+
+Given video \(V\) and metadata \((o_{\text{name}}, o_{\text{prompt}}, \text{task text})\), estimate metric trajectories of human joints/mesh \(H_t\) and object pose/geometry \(O_t\) in a consistent world frame.
+
+### 3.2 Stage A — Vision initialization
+
+Off-the-shelf init (currently MediaPipe Pose world landmarks on-laptop; swappable for SAM3D-Body / FoundationPose / V2D Docker modules when available). Outputs joint trajectories and a rough object centroid proxy.
+
+### 3.3 Stage B — Human-as-metric-ruler
+
+1. Detect foot–ground contacts (low foot height quantile + low vertical velocity).
+2. Fit a ground plane to contacting feet.
+3. Measure bone lengths; solve a global scale \(s\) so limbs match anthropometric targets for a reference body.
+4. Softly enforce contacting feet on the plane after scaling.
+   *v2 (2026-09-26):* bone targets now use Winter ratios (tibia 0.246·H; v1 used tibia = 0.80·femur, about 20% too short, which biased scale about 10% low). The floor is fit to the lowest foot landmark of each frame, with the normal pulled toward the torso up-axis and oriented toward the body (§6.4, bugs B1/B2).
+5. Transfer the metric frame to the object through grasp coupling (wrist–object attachment).
+
+This targets Chamfer failures caused by monocular scale drift.
+
+### 3.4 Stage C — Language → contact phases
+
+Parse task text into an ordered phase template from a fixed vocabulary:
+
+`approach`, `grasp_single`, `grasp_bimanual`, `manipulate`, `handoff`, `support_floor`, `support_table`, `release`, `wear_through`.
+
+Align templates to the video using:
+- motion energy, and
+- a hand–object contact score (wrist distance to an open-vocab / motion-salient object proxy).
+
+High contact mass is preferentially assigned to grasp / manipulate / wear phases; low contact to approach / release. Duration priors and valley snapping keep phases contiguous (≥ ~0.4 s when budget allows).
+
+### 3.5 Stage D — Contact-conditioned 4D optimizer
+
+Test-time optimization over joints (and object centroid / pose) with phase-gated losses:
+
+| Loss | Role | Score link |
+|------|------|------------|
+| \(L_{\text{data}}\) | Stay near Stage A | stability |
+| \(L_{\text{accel}}^H\) | Penalize joint jerk/accel | joint accel error |
+| \(L_{\text{accel}}^O\) | Penalize object accel | object accel error |
+| \(L_{\text{contact}}\) | Attract wrists to object in grasp/manip/wear | contact realism |
+| \(L_{\text{penetrate}}\) | Soft ground / body–object non-penetration | penetration |
+
+Optimizer: Adam (PyTorch) when available; L-BFGS-B fallback. Windows of ~60 frames per episode on laptop hardware.
+
+**v2 objective and solver (`chrome/optim_core.py`, `chrome/pipeline_v2.py`).**
+- Variables: joints \(X\), object centroid \(O\), and one rigid attachment offset \(C_s\) per grasp segment.
+- Human data term: Huber (δ = 0.1 m), with per-axis weights (depth axis 0.25).
+- Object data term: only on frames with a fresh OWL-ViT hit (confidence 0 elsewhere), depth axis weight 0.1.
+- Squared second differences on \(X\) and \(O\).
+- Rigid attachment \(\|O_t - A_t - C_{s(t)}\|^2\) during grasp phases, where \(A\) is the grasping wrist or the wrist midpoint.
+- Object static when not held.
+- Foot and object floor hinge, and bone-length constancy.
+
+The problem is solved over the full trajectory with L-BFGS (strong-Wolfe line search). The torch backend uses autograd and the scipy backend uses analytic gradients; they are tested to agree. Objects missing during grasp are initialised as wrist + segment offset. Weights were tuned on the synthetic train split only.
+
+## 4. Data and implementation notes
+
+- Track 1: 30 monocular RGB episodes (FORM-HOI subset), LeRobot layout, prompts and action text; no public GT meshes/poses.
+- Code: `D:\V2D_Challenge\chrome` (CHROME package).
+- Laptop path: RTX 4060 8GB, Python 3.10 for MediaPipe/torch; OpenCV proxies usable on 3.14.
+
+## 5. Preliminary results (laptop)
+
+**Metric ruler (MediaPipe world pose):** v1 scale factors were ≈ 0.99–1.05 across episodes 0,1,2,3,6,7. With the corrected anthropometric targets (v2), scales are 1.06–1.35 (mean 1.14) over all 30 episodes. So MediaPipe world skeletons are about 12% smaller than a 1.70 m Winter body.
+
+**Phase alignment:** Rule templates recover hoop `wear_through` and iron `manipulate` / `support_table` structure; contact proxy shifts boundaries vs motion-only (longer approach, later support on ep0/ep6 in current runs).
+
+**4D refine (v1, superseded):** loss decreased on all episodes, but §6 shows that a lower loss did not mean a correct solution. The v1 penetration term had the wrong sign on real data (B1), and v1 never used the object detections (B3).
+
+*These are engineering checkpoints, not leaderboard numbers. Official scores require `eval_reconstruction.py` packaging against held-out multi-view GT.*
+
+## 6. Evaluation (added 2026-09-26)
+
+### 6.1 Official metric status
+- **Official scorer.** `eval_reconstruction.py` is named on the challenge page but is **not public**. We searched the full tree of `github.com/nvidia-isaac/video_to_data` (main branch, 4,222 files; no match) and the HF dataset card.
+- **Closest released code.** The multi-view QC in `reconstruction/modules/v2d_mv_postprocess/lib/mv_eval_chamfer{,_human,_object}.py`. For each frame and camera it takes the visible predicted mesh vertices (z-buffer plus mask test), finds each vertex's nearest neighbour in the masked depth point cloud, averages those distances, and reports the mean and median over frames in mm. We reproduce this reduction in `chrome/eval_metrics.py::mv_style_chamfer_mm`. We cannot reproduce the visibility step, because it needs MV depth and masks.
+- **Submission format.** Unknown. The Track-1 GT schema was briefly published in the HF card (removed in commit `5ae9b06`, 2026-09-18). It had:
+  - `observation.object.pose` (T×7: x y z qw qx qy qz, metres, `world_T_object`, OpenCV frame);
+  - `observation.object.visible`;
+  - SOMA-X/MHR human parameters and `observation.mhr.joint_coords` (127×3).
+
+  `chrome/submission_export.py` writes a **provisional** package mirroring the object columns, plus our MediaPipe-33 joints, at 30 fps. It uses identity orientation because we do not estimate object rotation yet. The package is in `outputs/submission_provisional/` for all 30 episodes. It must be re-mapped once the official script is released.
+- **Held-out GT.** The pre-removal parquet files still exist in the HF git history. We deliberately did **not** download or use them: they are the organisers' withheld ground truth.
+- **Metrics in this report.** Everything below uses standard metrics, not the leaderboard definitions: Chamfer-L2 / mean-NN Chamfer, MPJPE (world, root-aligned, Procrustes), scale error, object translation error, acceleration error (m/s², fps-normalised), penetration depth below the floor, and contact F1 and contact-distance error.
+
+### 6.2 Synthetic ground-truth benchmark (`chrome/benchmark/`)
+- **Generator** (`synth.py`): 40 sequences at 15 fps (the Stage-A stride-2 rate), 130–175 frames each. Each has a MediaPipe-33 skeleton built from Winter proportions (height 1.55–1.90 m, ±4% per-segment jitter). Motion comes from a gait model, a squat/lean grasp search, and 2-link arm IK.
+- **Scenarios** (cycled by seed): reach–lift–to-table, bimanual carry, handoff (right → both → left), table manipulation (circular "iron" motion), and floor pick-and-place.
+- **Object:** a box rigidly attached to the grasping hand(s) with an offset fixed at grasp onset (the offset rotates with body heading). It rests on the floor or table otherwise. Per-frame phase labels and contact labels are exact.
+- **Frame:** everything is expressed in an OpenCV camera frame (camera 3.8–5.5 m away, ±40° azimuth).
+- **Corruption** (`corrupt.py`, seed-fixed):
+  - unknown global scale k ~ U(0.75, 1.30) about the camera centre (the monocular depth-scale ambiguity);
+  - per-joint noise σ 1.5–3 cm (×1.5 at the extremities), plus AR(1) depth jitter along the ray (σ 2–5 cm);
+  - 2% joint-group outlier events (10–30 cm, 1–3 frames);
+  - object "lift" noise of 2 cm in xy and 6 cm in depth, plus 3% outliers of 0.2–0.6 m;
+  - bursty detection dropout at coverage 95/80/60/**40%** (the 40% tier is the ep7-like hard case), with more misses while the object is held;
+  - phase boundaries shifted by up to ±6 frames (0.4 s).
+- **Split:** seeds 0–23 are train (all tuning, including the baselines' parameters); seeds 24–39 are held-out.
+- **Methods** (`baselines.py`, `run.py`):
+  - raw input, and raw input + metric ruler;
+  - Savitzky–Golay (window and order tuned on train: 31/3) + ruler;
+  - One-Euro (tuned: min_cutoff 0.1, β 0.5) + ruler;
+  - CHROME v1, re-run faithfully (legacy ruler, detections unused, Adam lr 1e-2 × 150, hard 60-frame windows, v1 weights);
+  - CHROME v2 and its ablations.
+- **Where to find the numbers:** `outputs/benchmark/results.json` (per-sequence rows) and `results.md`. The benchmark was run on the laptop; an independent run on a Linux box reproduces the table to about 0.01.
+
+### 6.3 Results: held-out split (16 sequences, mean ± std)
+| method | W-MPJPE mm | root-MPJPE mm | PA-MPJPE mm | scale err % | obj rel-to-root mm | obj trans mm | accel err H m/s² | accel err O m/s² | foot pen mm | obj pen mm | contact F1 | bone-len std mm |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| raw | 856.8 ± 389.4 | 112.8 ± 37.1 | 41.6 ± 8.9 | 17.6 ± 7.5 | 160.0 ± 55.2 | 861.7 ± 393.2 | 24.6 ± 5.8 | 20.8 ± 10.8 | 77.5 ± 119.7 | 27.6 ± 55.9 | 0.845 ± 0.111 | 32.1 ± 8.8 |
+| raw+ruler | 223.4 ± 130.6 | 57.3 ± 15.1 | 41.6 ± 8.9 | 4.73 ± 3.51 | 96.0 ± 20.9 | 231.2 ± 120.3 | 26.4 ± 4.9 | 22.3 ± 11.1 | 45.2 ± 48.9 | 15.3 ± 18.6 | 0.858 ± 0.087 | 34.5 ± 8.0 |
+| savgol(w=31,p=3)+ruler | 227.3 ± 128.8 | 51.0 ± 12.9 | 31.6 ± 4.9 | 4.32 ± 3.06 | 70.9 ± 20.4 | 224.8 ± 123.1 | 2.62 ± 0.47 | 1.50 ± 0.28 | 28.4 ± 38.1 | 14.4 ± 17.8 | 0.893 ± 0.091 | 13.8 ± 1.8 |
+| one_euro(mc=0.1,b=0.5)+ruler | 240.6 ± 116.6 | 58.9 ± 13.0 | 33.6 ± 4.4 | 4.35 ± 3.15 | 98.1 ± 25.4 | 231.4 ± 114.4 | 4.17 ± 0.83 | 3.08 ± 1.20 | 28.2 ± 38.5 | 14.3 ± 17.7 | 0.869 ± 0.092 | 16.4 ± 2.6 |
+| CHROME v1 (legacy) | 474.1 ± 219.7 | 71.5 ± 27.1 | 34.7 ± 5.7 | 5.46 ± 4.33 | 575.6 ± 86.2 | 728.0 ± 140.5 | 5.97 ± 0.88 | 3.24 ± 0.51 | 0.09 ± 0.15 | 0.00 ± 0.00 | 0.841 ± 0.087 | 38.8 ± 3.5 |
+| CHROME v2 | 217.7 ± 135.6 | 37.7 ± 14.5 | 21.2 ± 2.3 | 4.33 ± 3.13 | 50.8 ± 15.0 | 216.8 ± 130.2 | 1.72 ± 0.36 | 0.72 ± 0.11 | 30.2 ± 40.3 | 14.1 ± 19.6 | 0.896 ± 0.066 | 3.02 ± 0.54 |
+
+Summary of the held-out comparison (per-sequence wins in parentheses):
+- **Accuracy and smoothness.** CHROME v2 beats both raw+ruler and the tuned Savitzky–Golay baseline on:
+  - root-aligned MPJPE (16/16 sequences vs Savitzky–Golay);
+  - PA-MPJPE (16/16);
+  - object position relative to the body (16/16);
+  - joint and object acceleration error (16/16 each);
+  - bone-length consistency.
+- **World-frame errors.** World MPJPE and absolute object translation are dominated by the metric ruler's residual scale error. That error comes from the fixed 1.70 m height prior (4.3% here), so all ruler-based methods are close: CHROME 217.7 vs Savitzky–Golay 227.3 mm (16/16 wins, median −4.8 mm); object translation 11/16 wins.
+- **Penetration is not improved.** Measured against the *true* floor, CHROME has 30.2 mm foot penetration vs 28.4 mm for Savitzky–Golay (4/16 wins), and object penetration is on par. The floor CHROME uses is estimated in the mis-scaled frame, so a scale error moves the whole scene relative to the true floor, and that dominates this metric.
+- **v1.** CHROME v1 is worse than raw+ruler on object accuracy (575.6 mm, because it never used detections) and on root-MPJPE. Its near-zero penetration is an artefact of its under-estimated scale, not evidence of physical plausibility.
+
+**Ablations and variants** (held-out):
+| variant | W-MPJPE mm | root-MPJPE mm | PA-MPJPE mm | obj rel mm | obj trans (undetected frames) mm | accel err H | accel err O | foot pen mm | bone std mm |
+|---|---|---|---|---|---|---|---|---|---|
+| CHROME v2 | 217.7 ± 135.6 | 37.7 ± 14.5 | 21.2 ± 2.3 | 50.8 ± 15.0 | 232.0 ± 125.4 | 1.72 ± 0.36 | 0.72 ± 0.11 | 30.2 ± 40.3 | 3.02 ± 0.54 |
+| v2 untuned (default weights) | 219.1 ± 134.6 | 39.4 ± 13.9 | 23.2 ± 2.2 | 58.2 ± 14.7 | 233.6 ± 119.0 | 1.83 ± 0.38 | 1.01 ± 0.14 | 29.9 ± 40.3 | 3.12 ± 0.53 |
+| v2 - contact | 217.5 ± 135.8 | 37.2 ± 14.7 | 20.7 ± 2.5 | 57.1 ± 17.5 | 237.0 ± 122.6 | 1.71 ± 0.36 | 0.76 ± 0.13 | 30.2 ± 40.3 | 2.60 ± 0.41 |
+| v2 - penetration | 217.7 ± 135.6 | 37.7 ± 14.5 | 21.2 ± 2.3 | 50.8 ± 15.0 | 232.0 ± 125.4 | 1.72 ± 0.36 | 0.72 ± 0.11 | 30.4 ± 40.5 | 3.02 ± 0.54 |
+| v2 - accel | 222.9 ± 130.9 | 55.0 ± 15.0 | 40.1 ± 8.5 | 69.7 ± 12.9 | 234.7 ± 124.1 | 25.6 ± 4.7 | 17.4 ± 3.5 | 40.3 ± 46.8 | 4.92 ± 0.97 |
+| v2 - ruler | 856.4 ± 389.7 | 104.6 ± 41.3 | 21.1 ± 2.2 | 131.8 ± 53.2 | 848.7 ± 401.0 | 1.75 ± 0.38 | 0.74 ± 0.11 | 68.2 ± 109.3 | 2.81 ± 0.51 |
+| v2 - static | 217.7 ± 135.6 | 37.7 ± 14.5 | 21.2 ± 2.3 | 54.0 ± 14.8 | 231.1 ± 120.0 | 1.72 ± 0.36 | 0.85 ± 0.13 | 30.2 ± 40.3 | 2.99 ± 0.54 |
+| v2 - bone | 217.8 ± 135.6 | 38.4 ± 14.4 | 21.8 ± 2.4 | 51.6 ± 15.2 | 231.6 ± 125.2 | 1.73 ± 0.36 | 0.73 ± 0.11 | 30.2 ± 40.3 | 14.3 ± 2.3 |
+| v2 - huber (L2 data) | 217.4 ± 135.7 | 37.4 ± 14.5 | 20.8 ± 2.3 | 52.5 ± 14.3 | 232.6 ± 124.5 | 1.70 ± 0.36 | 0.76 ± 0.11 | 30.4 ± 40.4 | 3.19 ± 0.55 |
+| v2 - attach fill | 218.5 ± 135.3 | 39.6 ± 14.4 | 23.5 ± 2.1 | 55.8 ± 15.7 | 232.5 ± 125.1 | 1.72 ± 0.37 | 0.74 ± 0.11 | 30.2 ± 40.3 | 3.79 ± 0.71 |
+| v2 windowed (60, overlap 30) | 217.7 ± 135.6 | 37.7 ± 14.5 | 21.2 ± 2.4 | 52.1 ± 14.3 | 232.4 ± 126.0 | 1.72 ± 0.37 | 0.73 ± 0.11 | 30.2 ± 40.3 | 4.58 ± 0.85 |
+
+What each component contributes (from the table above):
+- **Acceleration prior:** the largest single gain (root-MPJPE 55.0 → 37.7 mm).
+- **Metric ruler:** removing it quadruples world errors.
+- **Rigid attachment:** removing it raises object-to-body error by 6.3 mm, although joints get 0.5 mm better.
+- **Attachment fill of undetected grasp frames:** −5.0 mm object error, −1.9 mm root-MPJPE.
+- **Static-object prior:** −3.2 mm object error, −0.13 m/s² object acceleration error.
+- **Bone prior:** bone-length std 14.3 → 3.0 mm.
+- **Huber vs L2:** mixed (L2 is 0.3 mm better on joints and 1.7 mm worse on the object). Huber was kept because the train split selected it.
+- **Object floor term:** the train split chose weight 0, so it has no effect. The foot term changes nothing measurable (−0.2 mm).
+- **Overlapping 60-frame windows with cosine blending:** equal to the full-trajectory solve except for bone consistency, so the full trajectory is the default. Windows remain available for long sequences.
+- **Weight tuning** (2-stage coordinate search on train, including per-axis depth weights): −1.7 mm root-MPJPE, −7.4 mm object error, −0.29 m/s² object acceleration error vs default weights. Part of the per-axis gain is **by construction**: the generator injects larger noise along the camera ray.
+
+**Stress test** (held-out re-corrupted at 10% detection coverage, below the ep7-like tier):
+| method | root-MPJPE mm | PA-MPJPE mm | obj rel mm | obj trans (undetected) mm | accel err H | accel err O | contact F1 |
+|---|---|---|---|---|---|---|---|
+| raw+ruler | 57.3 ± 15.1 | 41.6 ± 8.9 | 104.9 ± 29.7 | 234.1 ± 117.1 | 26.4 ± 4.9 | 5.56 ± 1.90 | 0.834 ± 0.103 |
+| savgol(w=31,p=3)+ruler | 51.0 ± 12.9 | 31.6 ± 4.9 | 90.9 ± 28.3 | 234.3 ± 116.5 | 2.62 ± 0.47 | 1.18 ± 0.18 | 0.858 ± 0.088 |
+| one_euro(mc=0.1,b=0.5)+ruler | 58.9 ± 13.0 | 33.6 ± 4.4 | 115.6 ± 32.2 | 240.1 ± 109.7 | 4.17 ± 0.83 | 1.65 ± 0.54 | 0.838 ± 0.099 |
+| CHROME v1 (legacy) | 71.7 ± 27.2 | 35.1 ± 6.0 | 575.1 ± 86.1 | 711.3 ± 138.1 | 5.97 ± 0.88 | 3.22 ± 0.51 | 0.840 ± 0.087 |
+| CHROME v2 | 37.9 ± 14.7 | 21.4 ± 2.8 | 60.8 ± 20.3 | 218.7 ± 126.3 | 1.72 ± 0.37 | 0.82 ± 0.13 | 0.899 ± 0.060 |
+
+At 10% coverage CHROME's object error rises from 50.8 to 60.8 mm but stays well below Savitzky–Golay (90.9 mm). This is where attachment filling pays off.
+
+### 6.4 Correctness tests and bugs found
+`pytest tests/` has 30 tests, all passing on the laptop (Python 3.10, torch 2.6 cu124) and on the Linux box. They cover:
+- finite-difference gradient checks of every loss term, with and without Huber;
+- torch autograd vs numpy analytic value and gradient (rtol 1e-7);
+- zero data/penetration/bone/static loss on GT;
+- GT is an exact fixed point when the motion priors are off, and drift from GT stays under 15 mm with the tuned full objective;
+- the optimizer cuts error by at least 20% on noisy input;
+- torch and scipy L-BFGS reach the same optimum;
+- scale recovery within 5% for k ∈ {0.7, 1.0, 1.35}, with the floor normal within 10°;
+- hand assignment.
+
+Bugs found and fixed:
+- **B1 – penetration sign.** `fit_ground_plane` made the largest Y/Z component of the normal positive. In MediaPipe world coordinates (y down) that points *into* the floor, so every object held at hand height was penalised as "penetrating", and the optimizer pushed objects toward and under the floor. This is why the v1 penetration residual was highest on ep7. Fixed by orienting the normal toward the body; a regression test reproduces the legacy behaviour.
+- **B2 – degenerate plane.** Foot contacts collected while walking in a line are nearly collinear, so the SVD normal was arbitrary (ep0: 47° tilt). Replaced by a torso-up-regularised fit on the lowest foot point of each frame; normals are now within about 5° on synthetic data.
+- **B3 – object detections unused.** `init_object_from_contact_proxy` ignored the OWL-ViT centroids: the object was simply 0.7·(nearer wrist) + 0.3·(wrist midpoint) at the median wrist depth. OWL coverage therefore had no effect. v2 lifts fresh detections to 3D using a least-squares image-to-world scale fitted on wrist pairs, and treats held or interpolated frames as missing.
+- **B4 – anthropometric targets.** Tibia = 0.8·femur was about 20% short, which biased scale about 10% low (§3.3).
+- **B5 – scipy backend.** L-BFGS-B was called without a Jacobian, which means finite differences over roughly 6k parameters. It now uses analytic gradients.
+- **B6 – Adam step size.** A fixed lr of 1e-2 m for 150 steps is not a converged solve: Adam moves each coordinate about lr per step regardless of gradient scale. Replaced by L-BFGS; the tests confirm convergence.
+- **B7 – hard windows.** v1 averaged hard 60-frame windows, each solved independently. v2 solves the full trajectory, with cosine-blended overlapping windows as an option.
+- **Weight balance.** The v1 accel:data ratio of 0.5 was far too weak for 15 fps second differences; the tuned ratio is 20 (human) and 33 (object, relative to its data weight).
+
+### 6.5 Real Track-1 episodes (GT-free proxies only)
+Stage A and phase alignment were run on **all 30 episodes** (Stage A about 5–12 s per episode, alignment with OWL-ViT about 15–25 s per episode). CHROME v2 ran on all 30 (about 6 s per episode on the RTX 4060). Outputs are in `outputs/optimize/`; the old v1 files are backed up in `summary_v1.json` and `outputs/optimize_v1_backup/`.
+
+Mean proxy values:
+
+| episodes | variant | mean accel H (m/s²) | mean accel O (m/s²) | bone-len std (mm) | foot pen vs est. floor (mm) | obj-centroid pen (mm) | wrist–object dist in grasp (mm) |
+|---|---|---|---|---|---|---|---|
+| 0,1,2,3,6,7 | Stage A + ruler | 6.81 | 1.29 | 28.7 | 4.25 | 4.27 | 242 |
+| 0,1,2,3,6,7 | Savitzky–Golay 31/3 + ruler | 0.54 | 0.72 | 27.6 | 2.82 | 4.10 | 238 |
+| 0,1,2,3,6,7 | CHROME v2 | 0.64 | 1.25 | 6.1 | 0.06 | 4.23 | 204 |
+| all 30 | Stage A + ruler | 7.16 | 2.02 | 26.3 | 4.50 | 2.54 | 588 |
+| all 30 | Savitzky–Golay 31/3 + ruler | 0.53 | 0.79 | 24.4 | 3.05 | 2.46 | 571 |
+| all 30 | CHROME v2 | 0.66 | 1.21 | 6.0 | 0.07 | 2.59 | 407 |
+
+- Scale factors: 1.06–1.35, mean 1.14.
+- Mean joint displacement from Stage A after scaling: 31 mm.
+- Fresh detections that land on Stage-A samples: ep0 52/395 samples, ep7 24/389 (the log records 22 hits in 52 attempts; the 2 extra are inferred frames before the first hit). Episodes 13–17 have 0–7 detections, so their object track is essentially wrist-derived.
+- These proxies are **not accuracy**. Lower acceleration or penetration does not mean closer to the multi-view reference; the synthetic benchmark (§6.3) is the only place where accuracy is measured. On real data the object acceleration proxy *rises* vs interpolated detections on some episodes (e.g. ep7 1.81 → 2.33). This is expected: with sparse detections, grasp frames follow the wrist rather than a straight-line interpolation.
+
+### 6.6 Honest limitations
+- **Not the leaderboard.** The synthetic benchmark is not the leaderboard score. Its noise model, motions, and the depth-dominant noise that the per-axis weights exploit are our assumptions. We have no official scorer, no Track-1 GT, and no MV reference.
+- **No object mesh or SE(3).** The object is a centroid. Object Chamfer charges the unmodelled rotation to the method, and the hula-hoop `wear_through` contact is not modelled.
+- **No global root motion on real data.** MediaPipe world landmarks are hip-centred per frame. The real-episode "world" frame therefore moves with the pelvis, and the static-object prior is switched off for real episodes. The benchmark, in contrast, evaluates in a true camera/world frame.
+- **Height prior.** Scale accuracy is capped by the fixed 1.70 m prior (about 4–5% error on synthetic subjects of 1.55–1.90 m). This error dominates world-frame MPJPE and penetration measured against the true floor.
+- **Object lift.** The detection lift uses the wrist depth and an image-to-world scale; there is no camera intrinsics model.
+
+## 7. Ablations planned for the report (superseded by §6.3)
+
+1. Full CHROME  
+2. No Stage B (vision scale only)  
+3. No Stage C (always-on contact losses)  
+4. Stage A only  
+
+Metrics: submission Chamfer axes when available; proxy metrics (accel, penetration, contact distance) for local iteration.
+
+## 8. Limitations
+
+- Object geometry is still under-specified on the laptop path (centroid / heuristic mesh ≠ full textured mesh).
+- Contact proxy without high-quality open-vocab detection is noisy; thin objects (hula hoop) need rim-aware contact, not solid SDF.
+- MediaPipe ≠ challenge-grade body/hand fidelity; Docker V2D reconstruction modules remain the intended Stage A upgrade.
+- Physical losses are proxies for NVIDIA’s exact metric definitions (see §6.6).
+
+## 9. Next steps toward submission
+
+1. Stronger Stage A (V2D `reconstruction/` modules or HMR + FoundationPose).  
+2. Object mesh + SE(3) in the optimizer, not only a centroid.  
+3. Hoop-specific `wear_through` contact model.  
+4. Re-map `chrome/submission_export.py` (provisional) to the official `eval_reconstruction.py` format when released.  
+5. Recover global root translation for real episodes (image landmarks + intrinsics prior) so world-frame priors apply.  
+6. Subject-height estimation to cut the ruler's residual scale error.
+
+## 10. One-paragraph CoRL blurb
+
+We present CHROME, a Track-1 method that reframes monocular HOI reconstruction as scoring-aligned test-time inference: the human body locks metric scale, language-conditioned contact phases gate physics losses, and a 4D optimizer minimizes acceleration and penetration objectives that match V2D evaluation — using foundation models only as initialization.
+
+---
+
+### Appendix A — Re-run commands (laptop, PowerShell)
+
+```powershell
+cd D:\V2D_Challenge\chrome
+$py = "C:\Users\Advait\AppData\Local\Programs\Python\Python310\python.exe"
+$env:HF_HOME = "D:\V2D_Challenge\chrome\models\hf"
+# tests
+& $py -m pytest -q -p no:cacheprovider tests
+# synthetic benchmark (train-split tuning is optional; best params in chrome\benchmark\best_config.json)
+& $py scripts\tune_benchmark.py --procs 4                     # stage 1 (writes outputs\benchmark\tuning.json)
+& $py scripts\run_benchmark.py --procs 4                      # -> outputs\benchmark\results.json / results.md
+# Stage A + phase alignment (all 30 episodes)
+& $py scripts\run_stage_a_pose_batch.py --episodes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 --stride 2
+& $py scripts\align_phases_episode.py --episodes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 --stride 3 --use-contact-proxy
+# CHROME v2 Stage D (+ proxies) and provisional export
+& $py scripts\run_optimize_4d_v2.py --episodes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
+& $py scripts\export_submission.py --episodes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
+```
+
+Note: use at most ~4 worker processes on the laptop (16 torch workers exhausted RAM).
+
+### Appendix B — Artifact map
+
+| Artifact | Path |
+|----------|------|
+| Method notes | `D:\V2D_Challenge\CHROME_METHOD.md` |
+| This draft | `D:\V2D_Challenge\chrome\docs\CHROME_TECHNICAL_REPORT.md` |
+| Phase templates | `chrome\outputs\phases\` |
+| Aligned phases | `chrome\outputs\phases\aligned\` |
+| Stage A joints | `chrome\outputs\init\episode_*\` |
+| Optimized traj (v2) | `chrome\outputs\optimize\episode_*\` + `summary.json` |
+| v1 outputs backup | `chrome\outputs\optimize_v1_backup\`, `outputs\optimize\summary_v1.json` |
+| Benchmark results | `chrome\outputs\benchmark\results.json`, `results.md`, `tuning.json` |
+| Provisional submission | `chrome\outputs\submission_provisional\` |
+| Metrics / benchmark code | `chrome\chrome\eval_metrics.py`, `chrome\chrome\benchmark\`, `tests\` |

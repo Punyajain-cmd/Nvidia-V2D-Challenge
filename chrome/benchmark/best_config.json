@@ -1,0 +1,36 @@
+{
+  "source": "outputs/benchmark/tuning.json (train split seeds 0-23 only; coordinate search, 2 stages)",
+  "chrome_weights": {
+    "w_data": 1.0,
+    "w_data_o": 0.3,
+    "huber_delta": 0.1,
+    "w_accel_h": 20,
+    "w_accel_o": 10,
+    "w_contact": 0.3,
+    "contact_mode": "attach",
+    "w_static": 10.0,
+    "w_penetrate": 0.0,
+    "w_foot_pen": 10.0,
+    "w_bone": 1.0,
+    "margin": 0.0,
+    "joint_axis_w": [
+      1.0,
+      1.0,
+      0.25
+    ],
+    "obj_axis_w": [
+      1.0,
+      1.0,
+      0.1
+    ]
+  },
+  "savgol": {
+    "window": 31,
+    "poly": 3
+  },
+  "one_euro": {
+    "mc": 0.1,
+    "beta": 0.5
+  },
+  "train_score": 4.663161023971029
+}

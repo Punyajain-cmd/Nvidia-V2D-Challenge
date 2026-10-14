@@ -1,0 +1,122 @@
+{
+ "hula_hoop": {
+  "vertices": 960,
+  "faces": 1920,
+  "extents_m": [
+   0.816,
+   0.816,
+   0.015
+  ],
+  "parts": 1,
+  "all_parts_watertight": true,
+  "area_m2": 0.1242
+ },
+ "big_red_bowl": {
+  "vertices": 1344,
+  "faces": 2688,
+  "extents_m": [
+   0.36,
+   0.36,
+   0.15
+  ],
+  "parts": 1,
+  "all_parts_watertight": true,
+  "area_m2": 0.3537
+ },
+ "iron": {
+  "vertices": 34,
+  "faces": 52,
+  "extents_m": [
+   0.26,
+   0.11,
+   0.13
+  ],
+  "parts": 4,
+  "all_parts_watertight": true,
+  "area_m2": 0.1258
+ },
+ "white_desk": {
+  "vertices": 40,
+  "faces": 60,
+  "extents_m": [
+   1.0,
+   0.5,
+   0.73
+  ],
+  "parts": 5,
+  "all_parts_watertight": true,
+  "area_m2": 1.5508
+ },
+ "black_pan": {
+  "vertices": 296,
+  "faces": 588,
+  "extents_m": [
+   0.455,
+   0.26,
+   0.05
+  ],
+  "parts": 2,
+  "all_parts_watertight": true,
+  "area_m2": 0.1723
+ },
+ "foam_grass_block": {
+  "vertices": 8,
+  "faces": 12,
+  "extents_m": [
+   0.3,
+   0.2,
+   0.15
+  ],
+  "parts": 1,
+  "all_parts_watertight": true,
+  "area_m2": 0.27
+ },
+ "paint_roller": {
+  "vertices": 100,
+  "faces": 184,
+  "extents_m": [
+   0.241,
+   0.06,
+   0.38
+  ],
+  "parts": 4,
+  "all_parts_watertight": true,
+  "area_m2": 0.0847
+ },
+ "pink_foam_roll": {
+  "vertices": 82,
+  "faces": 160,
+  "extents_m": [
+   0.45,
+   0.15,
+   0.15
+  ],
+  "parts": 1,
+  "all_parts_watertight": true,
+  "area_m2": 0.247
+ },
+ "short_wood_stool": {
+  "vertices": 186,
+  "faces": 352,
+  "extents_m": [
+   0.3,
+   0.3,
+   0.45
+  ],
+  "parts": 5,
+  "all_parts_watertight": true,
+  "area_m2": 0.331
+ },
+ "white_laptop_cart": {
+  "vertices": 128,
+  "faces": 228,
+  "extents_m": [
+   0.6,
+   0.45,
+   0.9
+  ],
+  "parts": 7,
+  "all_parts_watertight": true,
+  "area_m2": 1.4433
+ }
+}

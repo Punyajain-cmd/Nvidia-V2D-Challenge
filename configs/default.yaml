@@ -1,0 +1,25 @@
+# CHROME default config (Track 1)
+track1_root: "D:/V2D_Challenge/video_to_data_challenge/track_1"
+chrome_root: "D:/V2D_Challenge/chrome"
+fps: 30
+
+metric_ruler:
+  vel_thresh: 0.15
+  height_quantile: 0.20
+  reference_height_m: 1.70
+  subject_height_factor: 1.0
+
+phases:
+  parser: rule_based_v1
+  align: uniform
+
+optimize_4d:
+  n_iters: 150
+  lr: 0.01
+  w_data: 1.0
+  w_accel_h: 0.5
+  w_accel_o: 0.5
+  w_contact: 0.3
+  w_penetrate: 0.5
+  w_scale: 0.0
+  backend: auto

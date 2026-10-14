@@ -1,0 +1,23 @@
+﻿# data / outputs / weights (not redistributed)
+data/
+outputs/
+models/
+**/hf/
+.cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.task
+*.zip
+*.npz
+*.parquet
+# python
+__pycache__/
+*.pyc
+.venv/
+venv*/
+.pytest_cache/
+# secrets
+.env
+kaggle.json
